@@ -26,8 +26,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: set lower case owner name
-        run: |
-          echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
+        id: set_owner_lc
+        run: echo "owner_lc=${OWNER,,}" >> $GITHUB_OUTPUT
         env:
           OWNER: '${{ github.repository_owner }}'
 
@@ -37,5 +37,5 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/${{ OWNER_LC }}/${{ github.event.repository.name }}:latest
+          tags: ghcr.io/${{ steps.set_owner_lc.outputs.owner_lc }}/${{ github.event.repository.name }}:latest
           platforms: linux/amd64
