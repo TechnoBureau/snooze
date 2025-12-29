@@ -11,10 +11,11 @@ Ever wanted an HTTP server that does *almost nothing*, but does it with style? *
 - **Ultra-Lightweight**: Small single-binary server with minimal dependencies.
 - **Default Port**: `80`, so you don’t have to think too hard.
 - **Default Message**: `"Hello from snooze!"`, because sometimes that’s all you need.
+- **Reverse Proxy Mode**: Forward requests to an upstream host with full logging capabilities.
 - **Flexible Overriding**:
-  - **Environment Variables**: `PORT`, `MESSAGE` (Highest priority)
-  - **Command-Line Flags**: `--port=YOUR_PORT`, `--message=YOUR_MESSAGE` (Used only if env var not set)
-  - **Defaults**: If neither environment variables nor command-line flags are provided, snooze uses `80` and `"Hello from snooze!"`.
+  - **Environment Variables**: `PORT`, `MESSAGE`, `PROXY_HOST`, `PROXY_PORT` (Highest priority)
+  - **Command-Line Flags**: `--port`, `--message`, `--proxy-host`, `--proxy-port` (Used only if env var not set)
+  - **Defaults**: If neither provided, snooze uses `80` and `"Hello from snooze!"`.
 - **Graceful Shutdown**: Handles `SIGINT` and `SIGTERM`, letting you put it to bed without fuss.
 - **Structured JSON logging**: Easy ingestion by logging systems.
 
@@ -91,6 +92,37 @@ docker run --rm -p 7070:7070 \
 ```bash
 curl http://localhost:7070
 # Output: "Hello from snooze!"
+```
+
+### Reverse Proxy Mode
+
+You can run **snooze** as a transparent proxy to log requests before forwarding them to an upstream service.
+
+#### Using Command-Line Flags
+
+```bash
+# Proxy local port 8080 to example.com:80
+docker run --rm -p 8080:8080 \
+  ghcr.io/technobureau/snooze:latest \
+  --port=8080 \
+  --proxy-host=example.com \
+  --proxy-port=80
+```
+
+#### Using Environment Variables
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e PORT=8080 \
+  -e PROXY_HOST=example.com \
+  -e PROXY_PORT=80 \
+  ghcr.io/technobureau/snooze:latest
+```
+
+Check:
+```bash
+curl -H "Host: example.com" http://localhost:8080
+# Output: Response from example.com
 ```
 
 ## Build (Optional)
@@ -227,7 +259,40 @@ spec:
 
 With this setup, **snooze** reads your HTML from the `MESSAGE` environment variable. When you make a request to port **8080**, you’ll receive your entire HTML from the ConfigMap.
 
-### 4. Multi-Path Ingress Example
+### 4. Reverse Proxy Deployment
+
+This example demonstrates how to deploy **snooze** as a reverse proxy, forwarding traffic to an external service (e.g., `example.com`).
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snooze-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: snooze-proxy
+  template:
+    metadata:
+      labels:
+        app: snooze-proxy
+    spec:
+      containers:
+      - name: snooze
+        image: ghcr.io/technobureau/snooze:latest
+        env:
+          - name: PROXY_HOST
+            value: "example.com"
+          - name: PROXY_PORT
+            value: "80"
+          - name: PORT
+            value: "8080"
+        ports:
+        - containerPort: 8080
+```
+
+### 5. Multi-Path Ingress Example
 
 Below is a demonstration of path-based routing across three color-coded Deployments and Services. Each path (/red, /green, /blue) points to a different instance of snooze, each listening on a distinct port and returning a unique message.
 
@@ -432,27 +497,46 @@ Logs are emitted as JSON objects. Every log entry contains a fixed prefix and ma
 
 - `ts`: ISO8601 timestamp (string)
 - `level`: `error` | `info` | `debug` (string)
-- `subsystem`: Logical subsystem that produced the log (e.g. `net`, `app`, `http`) (string)
-- `exec_time`: A quoted string formatted with four decimals (seconds) that represents the time value relevant to the event
+- `module`: Logical module that produced the log (e.g. `net`, `app`, `http`) (string)
+- `time`: A quoted string formatted with four decimals (seconds) that represents the time value relevant to the event
 
-Notes on `exec_time` semantics:
+Notes on `time` semantics:
 
-- For HTTP request logs (`subsystem":"http"`), `exec_time` is the total elapsed time to process that request, including any snooze delay. It is measured as seconds with four decimal places and always emitted in double-quotes, e.g. `"1.0000"`.
-- For lifecycle and system events (subsystem `app` or `net`), `exec_time` represents a short duration relevant to the event:
+- For HTTP request logs (`module":"http"`), `time` is the total elapsed time to process that request, including any snooze delay or proxy overhead. It is measured as seconds with four decimal places and always emitted in double-quotes, e.g. `"1.0000"`.
+- For lifecycle and system events (module `app` or `net`), `time` represents a short duration relevant to the event:
   - The `start` log uses elapsed time since process start.
-  - When a shutdown signal is received, the server emits `shutdown_requested` with `exec_time` = elapsed since process start, then after completing shutdown it emits a final `shutdown` log whose `exec_time` is the duration taken to complete shutdown (both formatted as quoted strings with four decimals).
+  - When a shutdown signal is received, the server emits `shutdown_requested` with `time` = elapsed since process start, then after completing shutdown it emits a final `shutdown` log whose `time` is the duration taken to complete shutdown.
 - Error logs include the relevant `op` and `error` fields in the JSON body.
 
-Additional fields in request logs:
+### Request Logs (Standard)
+
+Standard fields in request logs:
 
 - `method`: HTTP method (string)
-- `path` or `uri`: Request path (string)
+- `path`: Request path (string)
 - `agent`: `User-Agent` value when present (string)
 - Additional headers are included as key/value pairs in the JSON body when present
 
-Example request log (single-line JSON):
+### Proxy Metrics
 
-{"ts":"2025-08-24T12:34:56+0000","level":"info","subsystem":"http","exec_time":"1.0000","method":"GET","path":"/snooze/1","agent":"curl/7.68.0","Accept":"*/*"}
+When running in proxy mode (e.g. `--proxy-host=...`), the following additional metrics are logged:
+
+- `proxy_host`: The upstream host (string)
+- `proxy_port`: The upstream port (integer)
+- `proxy_connect_time`: Time taken to resolve and establish TCP connection to upstream (string, seconds)
+- `proxy_response_time`: Time taken to stream the response from upstream to client (string, seconds)
+
+### Example Logs
+
+**Snooze Request:**
+```json
+{"ts":"2025-08-24T12:34:56+0000","level":"info","module":"http","time":"1.0051","method":"GET","path":"/snooze/1","agent":"curl/7.68.0"}
+```
+
+**Proxy Request:**
+```json
+{"ts":"2025-08-24T12:34:57+0000","level":"info","module":"http","time":"0.1234","method":"GET","path":"/","agent":"curl/7.68.0","proxy_host":"example.com","proxy_port":80,"proxy_connect_time":"0.0500","proxy_response_time":"0.0700"}
+```
 
 Tips
 
@@ -460,8 +544,7 @@ Tips
 
 ```bash
 # Example: count requests and avg exec_time
-cat logs.json | jq -r -c '. | select(.subsystem=="http") | {exec_time: .exec_time}' | \
-  jq -s 'map(tonumber(.exec_time)) | {count: length, avg: (add/length)}'
+cat logs.json | jq -r -c '. | select(.module=="http") | {time: .time}' | \
+  jq -s 'map(tonumber(.time)) | {count: length, avg: (add/length)}'
 ```
 
-(Adapt tooling to your logging pipeline; exec_time is emitted as a quoted string.)
